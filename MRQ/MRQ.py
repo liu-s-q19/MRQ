@@ -115,12 +115,6 @@ class Agent:
 
         # Used by reward prediction
         self.two_hot = TwoHot(self.device, self.lower, self.upper, self.num_bins)
-        self.gammas = torch.zeros(1, self.Q_horizon, 1, device=self.device)
-        discount = 1
-        for t in range(self.Q_horizon):
-            self.gammas[:,t] = discount
-            discount *= self.discount
-        self.discount = discount
 
         # Environment properties
         self.pixel_obs = pixel_obs
@@ -165,9 +159,9 @@ class Agent:
 
         state, action, next_state, reward, not_done = self.replay_buffer.sample(self.Q_horizon, include_intermediate=False)
         state, next_state = maybe_augment_state(state, next_state, self.pixel_obs, self.pixel_augs)
-        reward, not_done = multi_step_reward(reward, not_done, self.gammas)
+        reward, term_discount = multi_step_reward(reward, not_done, self.discount)
 
-        Q, Q_target = self.train_rl(state, action, next_state, reward, not_done,
+        Q, Q_target = self.train_rl(state, action, next_state, reward, term_discount,
             self.reward_scale, self.target_reward_scale)
 
         if self.prioritized:
@@ -204,7 +198,7 @@ class Agent:
 
 
     def train_rl(self, state: torch.Tensor, action: torch.Tensor, next_state: torch.Tensor,
-        reward: torch.Tensor, not_done: torch.Tensor, reward_scale: float, target_reward_scale: float):
+        reward: torch.Tensor, term_discount: torch.Tensor, reward_scale: float, target_reward_scale: float):
         with torch.no_grad():
             next_zs = self.encoder_target.zs(next_state)
 
@@ -213,7 +207,7 @@ class Agent:
 
             next_zsa = self.encoder_target(next_zs, next_action)
             Q_target = self.value_target(next_zsa).min(1,keepdim=True).values
-            Q_target = (reward + not_done * self.discount * Q_target * target_reward_scale)/reward_scale
+            Q_target = (reward + term_discount * Q_target * target_reward_scale)/reward_scale
 
             zs = self.encoder.zs(state)
             zsa = self.encoder(zs, action)
@@ -311,8 +305,14 @@ def masked_mse(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor):
     return (F.mse_loss(x, y, reduction='none') * mask).mean()
 
 
-def multi_step_reward(reward: torch.Tensor, not_done: torch.Tensor, gammas: torch.Tensor):
-    return (reward * not_done * gammas).sum(1), not_done.prod(1)
+def multi_step_reward(reward: torch.Tensor, not_done: torch.Tensor, discount: float):
+    ms_reward = 0
+    scale = 1
+    for i in range(reward.shape[1]):
+        ms_reward += scale * reward[:,i]
+        scale *= discount * not_done[:,i]
+    
+    return ms_reward, scale
 
 
 def maybe_augment_state(state: torch.Tensor, next_state: torch.Tensor, pixel_obs: bool, use_augs: bool):
