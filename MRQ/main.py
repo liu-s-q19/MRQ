@@ -10,10 +10,13 @@ import dataclasses
 import os
 import pickle
 import time
+import json
+from tqdm import tqdm
 os.environ["MUJOCO_GL"] = "egl"  # 推荐优先尝试 egl
 
 import numpy as np
 import torch
+from torch.utils.tensorboard import SummaryWriter
 
 import env_preprocessing
 import MRQ
@@ -81,34 +84,43 @@ def main():
         agent = MRQ.Agent(env.obs_shape, env.action_dim, env.max_action,
             env.pixel_obs, env.discrete, device, env.history)
 
-        logger = utils.Logger(f'{args.log_folder}/{args.project_name}.txt')
+        # 创建TensorBoard日志记录器
+        writer = SummaryWriter(log_dir=os.path.join(args.log_folder, args.project_name))
+        
+        # 记录实验配置
+        config = {
+            'algorithm': agent.name,
+            'env': env.env_name,
+            'seed': env.seed,
+            'obs_shape': env.obs_shape,
+            'action_dim': env.action_dim,
+            'discrete_actions': env.discrete,
+            'pixel_obs': env.pixel_obs,
+            'total_timesteps': args.total_timesteps,
+            'eval_freq': args.eval_freq,
+            'eval_eps': args.eval_eps,
+            **dataclasses.asdict(agent.hp)
+        }
+        
+        # 保存配置到JSON文件
+        config_path = os.path.join(args.log_folder, args.project_name, 'config.json')
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+            
+        # 记录配置到TensorBoard（使用text而不是hparams）
+        config_text = '\n'.join([f'{k}: {v}' for k, v in config.items()])
+        writer.add_text('config', config_text, 0)
 
-        exp = OnlineExperiment(agent, env, eval_env, logger, [],
+        exp = OnlineExperiment(agent, env, eval_env, writer, [],
             0, args.total_timesteps, 0,
             args.eval_freq, args.eval_eps, args.eval_folder, args.project_name,
             args.save_experiment, args.save_freq, args.save_folder)
-
-    exp.logger.title('Experiment')
-    exp.logger.log_print(f'Algorithm:\t{exp.agent.name}')
-    exp.logger.log_print(f'Env:\t\t{exp.env.env_name}')
-    exp.logger.log_print(f'Seed:\t\t{exp.env.seed}')
-
-    exp.logger.title('Environment hyperparameters')
-    if hasattr(exp.env.env, 'hp'): exp.logger.log_print(exp.env.env.hp)
-    exp.logger.log_print(f'Obs shape:\t\t{exp.env.obs_shape}')
-    exp.logger.log_print(f'Action dim:\t\t{exp.env.action_dim}')
-    exp.logger.log_print(f'Discrete actions:\t{exp.env.discrete}')
-    exp.logger.log_print(f'Pixel observations:\t{exp.env.pixel_obs}')
-
-    exp.logger.title('Agent hyperparameters')
-    exp.logger.log_print(exp.agent.hp)
-    exp.logger.log_print('-'*40)
 
     exp.run()
 
 
 class OnlineExperiment:
-    def __init__(self, agent: object, env: object, eval_env: object, logger: object, evals: list,
+    def __init__(self, agent: object, env: object, eval_env: object, writer: SummaryWriter, evals: list,
             t: int, total_timesteps: int, time_passed: float,
             eval_freq: int, eval_eps: int, eval_folder: str, project_name: str,
             save_full: bool=False, save_freq: int=1e5, save_folder: str=''):
@@ -117,7 +129,7 @@ class OnlineExperiment:
         self.eval_env = eval_env
         self.evals = evals
 
-        self.logger = logger
+        self.writer = writer
 
         self.t = t
         self.time_passed = time_passed
@@ -138,6 +150,7 @@ class OnlineExperiment:
 
     def run(self):
         state = self.env.reset()
+        pbar = tqdm(total=self.total_timesteps, initial=self.t, desc='Training')
         while self.t <= self.total_timesteps:
             self.maybe_evaluate()
             if self.save_full and self.t % self.save_freq == 0 and not self.init_timestep:
@@ -153,15 +166,23 @@ class OnlineExperiment:
             self.agent.train()
 
             if terminated or truncated:
-                self.logger.log_print(
-                    f'Total T: {self.t + 1}, '
-                    f'Episode Num: {self.env.ep_num}, '
-                    f'Episode T: {self.env.ep_timesteps}, '
-                    f'Reward: {self.env.ep_total_reward:.3f}')
+                # 记录每个episode的信息
+                self.writer.add_scalar('train/episode_reward', self.env.ep_total_reward, self.env.ep_num)
+                self.writer.add_scalar('train/episode_length', self.env.ep_timesteps, self.env.ep_num)
+                self.writer.add_scalar('train/total_timesteps', self.t + 1, self.env.ep_num)
+                
+                pbar.set_postfix({
+                    'episode': self.env.ep_num,
+                    'ep_len': self.env.ep_timesteps,
+                    'reward': f'{self.env.ep_total_reward:.3f}'
+                })
                 state = self.env.reset()
 
             self.t += 1
+            pbar.update(1)
             self.init_timestep = False
+        
+        pbar.close()
 
 
     def maybe_evaluate(self):
@@ -173,19 +194,26 @@ class OnlineExperiment:
             return
 
         total_reward = np.zeros(self.eval_eps)
-        for ep in range(self.eval_eps):
+        for ep in tqdm(range(self.eval_eps), desc='Evaluating', leave=False):
             state, terminated, truncated = self.eval_env.reset(), False, False
             while not (terminated or truncated):
                 action = self.agent.select_action(np.array(state), use_exploration=False)
                 state, _, terminated, truncated = self.eval_env.step(action)
             total_reward[ep] = self.eval_env.ep_total_reward
 
-        self.evals.append(total_reward.mean())
+        mean_reward = total_reward.mean()
+        self.evals.append(mean_reward)
 
-        self.logger.title(
-            f'Evaluation at {self.t} time steps\n'
-            f'Average total reward over {self.eval_eps} episodes: {total_reward.mean():.3f}\n'
-            f'Total time passed: {round((time.time() - self.start_time + self.time_passed)/60., 2)} minutes')
+        # 记录评估结果
+        self.writer.add_scalar('eval/mean_reward', mean_reward, self.t)
+        self.writer.add_scalar('eval/std_reward', total_reward.std(), self.t)
+        self.writer.add_scalar('time/total_minutes', 
+                             (time.time() - self.start_time + self.time_passed)/60., 
+                             self.t)
+
+        print(f'\nEvaluation at {self.t} time steps\n'
+              f'Average total reward over {self.eval_eps} episodes: {mean_reward:.3f}\n'
+              f'Total time passed: {round((time.time() - self.start_time + self.time_passed)/60., 2)} minutes')
 
         np.savetxt(f'{self.eval_folder}/{self.project_name}.txt', self.evals, fmt='%.14f')
 
@@ -206,7 +234,7 @@ def save_experiment(exp: OnlineExperiment):
     # Save agent
     exp.agent.save(f'{exp.save_folder}/{exp.project_name}')
 
-    exp.logger.title('Saved experiment')
+    print('Saved experiment')
 
 
 def load_experiment(save_folder: str, project_name: str, device: torch.device, args: object):
@@ -227,12 +255,20 @@ def load_experiment(save_folder: str, project_name: str, device: torch.device, a
         env.pixel_obs, env.discrete, device, env.history, dataclasses.asdict(agent_dict['hp']))
     agent.load(f'{save_folder}/{project_name}')
 
-    logger = utils.Logger(f'{args.log_folder}/{args.project_name}.txt')
-    logger.title(
-        'Loaded experiment\n'
-        f'Starting from: {exp_dict["t"]} time steps.')
+    # 创建TensorBoard日志记录器
+    writer = SummaryWriter(log_dir=os.path.join(args.log_folder, args.project_name))
+    
+    # 加载并记录配置
+    config_path = os.path.join(args.log_folder, args.project_name, 'config.json')
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        config_text = '\n'.join([f'{k}: {v}' for k, v in config.items()])
+        writer.add_text('config', config_text, 0)
+    
+    print(f'Loaded experiment\nStarting from: {exp_dict["t"]} time steps.')
 
-    return OnlineExperiment(agent, env, eval_env, logger, evals,
+    return OnlineExperiment(agent, env, eval_env, writer, evals,
         exp_dict['t'], args.total_timesteps, exp_dict['time_passed'],
         exp_dict['eval_freq'], exp_dict['eval_eps'], args.eval_folder, args.project_name,
         args.save_experiment, args.save_freq, args.save_folder)
