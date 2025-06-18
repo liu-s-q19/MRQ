@@ -9,7 +9,7 @@ from collections import deque
 import dataclasses
 from functools import partial
 from typing import Dict
-
+from typing import Union
 import gymnasium as gym
 import numpy as np
 
@@ -60,7 +60,7 @@ class Env:
         return state if self.remove_info else (state, info)
 
 
-    def step(self, action: int | float):
+    def step(self, action: Union[int, float]):
         next_state, reward, terminated, truncated, info = self.env.step(action)
 
         self.ep_total_reward += reward
@@ -82,7 +82,7 @@ class GymPreprocessing:
         self.action_space = self.env.action_space
 
 
-    def step(self, action: int | float):
+    def step(self, action: Union[int, float]):
         return self.env.step(action)
 
 

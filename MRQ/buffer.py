@@ -8,6 +8,7 @@
 from collections import deque
 import numpy as np
 import torch
+from typing import Union
 
 
 # We include some optimizations in this buffer to storing states multiple times when history or horizon > 1.
@@ -80,7 +81,7 @@ class ReplayBuffer:
 
 
     # Used to map discrete actions to one hot or normalize continuous actions.
-    def one_hot_or_normalize(self, action: int | float):
+    def one_hot_or_normalize(self, action: Union[int, float]):
         if isinstance(action, int):
             one_hot_action = torch.zeros(self.action_dim, device=self.device)
             one_hot_action[action] = 1
@@ -88,7 +89,7 @@ class ReplayBuffer:
         return torch.tensor(action/self.action_scale, dtype=torch.float, device=self.device)
 
 
-    def add(self, state: np.array, action: int | float, next_state: np.array, reward: float, terminated: bool, truncated: bool):
+    def add(self, state: np.array, action: Union[int, float], next_state: np.array, reward: float, terminated: bool, truncated: bool):
         self.obs[self.ind] = self.extract_obs(state)
         self.action_reward_notdone[self.ind,0] = reward
         self.action_reward_notdone[self.ind,1] = 1. - terminated

@@ -7,7 +7,7 @@
 
 import dataclasses
 import pprint
-
+from typing import Union
 import numpy as np
 
 
@@ -26,7 +26,7 @@ class Logger:
         self.log_file = log_file
 
 
-    def log_print(self, x: str | object):
+    def log_print(self, x: Union[str, object]):
         with open(self.log_file, 'a') as f:
             if isinstance(x, str):
                 print(x)

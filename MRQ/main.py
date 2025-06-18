@@ -10,6 +10,7 @@ import dataclasses
 import os
 import pickle
 import time
+os.environ["MUJOCO_GL"] = "egl"  # 推荐优先尝试 egl
 
 import numpy as np
 import torch
