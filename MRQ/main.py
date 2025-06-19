@@ -56,6 +56,8 @@ def main():
     parser.add_argument('--save_experiment', default=False, action=argparse.BooleanOptionalAction, type=bool)
     parser.add_argument('--save_freq', default=1e5, type=int)
     parser.add_argument('--load_experiment', default=False, action=argparse.BooleanOptionalAction, type=bool)
+    # 新增：优先经验回放开关
+    parser.add_argument('--use_prio_buffer', action='store_true', help='Use prioritized replay buffer')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() and args.device=='cuda' else 'cpu')
@@ -66,7 +68,10 @@ def main():
     if args.eval_freq == -1: args.eval_freq = default_arguments.__dict__[f'{env_type}_eval_freq']
 
     # File name and make folders
-    if args.project_name == '': args.project_name = f'MRQ+{args.env}+{args.seed}'
+    if args.project_name == '':
+        args.project_name = f'MRQ+{args.env}+{args.seed}'
+        if args.use_prio_buffer:
+            args.project_name += '+PRIO'
     if not os.path.exists(args.eval_folder): os.makedirs(args.eval_folder)
     if not os.path.exists(args.log_folder): os.makedirs(args.log_folder)
     if args.save_experiment and not os.path.exists(f'{args.save_folder}/{args.project_name}'):
@@ -82,7 +87,7 @@ def main():
         eval_env = env_preprocessing.Env(args.env, args.seed+100, eval_env=True) # +100 to make sure the seed is different.
 
         agent = MRQ.Agent(env.obs_shape, env.action_dim, env.max_action,
-            env.pixel_obs, env.discrete, device, env.history)
+            env.pixel_obs, env.discrete, device, env.history, use_prio_buffer=args.use_prio_buffer)
 
         # 创建TensorBoard日志记录器
         writer = SummaryWriter(log_dir=os.path.join(args.log_folder, args.project_name))
@@ -99,6 +104,7 @@ def main():
             'total_timesteps': args.total_timesteps,
             'eval_freq': args.eval_freq,
             'eval_eps': args.eval_eps,
+            'use_prio_buffer': args.use_prio_buffer,
             **dataclasses.asdict(agent.hp)
         }
         

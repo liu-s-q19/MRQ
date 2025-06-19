@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import buffer
 import models
 import utils
+import prio_buffer
 
 
 @dataclasses.dataclass
@@ -81,7 +82,7 @@ class Hyperparameters:
 
 class Agent:
     def __init__(self, obs_shape: tuple, action_dim: int, max_action: float, pixel_obs: bool, discrete: bool,
-        device: torch.device, history: int=1, hp: Dict={}):
+        device: torch.device, history: int=1, hp: Dict={}, use_prio_buffer: bool=False):
         self.name = 'MR.Q'
 
         self.hp = Hyperparameters(**hp)
@@ -93,10 +94,17 @@ class Agent:
             self.noise_clip *= 0.5
             self.target_policy_noise *= 0.5
 
-        self.replay_buffer = buffer.ReplayBuffer(
-            obs_shape, action_dim, max_action, pixel_obs, self.device,
-            history, max(self.enc_horizon, self.Q_horizon), self.buffer_size, self.batch_size,
-            self.prioritized, initial_priority=self.min_priority)
+        if use_prio_buffer:
+            self.replay_buffer = prio_buffer.PrioritizedReplayBuffer(
+                obs_shape, action_dim, max_action, pixel_obs, self.device,
+                history, max(self.enc_horizon, self.Q_horizon), self.buffer_size, self.batch_size,
+                alpha=getattr(self, 'alpha', 0.6), beta=0.4, beta_increment=0.001, initial_priority=getattr(self, 'min_priority', 1.0)
+            )
+        else:
+            self.replay_buffer = buffer.ReplayBuffer(
+                obs_shape, action_dim, max_action, pixel_obs, self.device,
+                history, max(self.enc_horizon, self.Q_horizon), self.buffer_size, self.batch_size,
+                self.prioritized, initial_priority=self.min_priority)
 
         self.encoder = models.Encoder(obs_shape[0] * history, action_dim, pixel_obs,
             self.num_bins, self.zs_dim, self.za_dim, self.zsa_dim,
@@ -118,7 +126,8 @@ class Agent:
 
         # Environment properties
         self.pixel_obs = pixel_obs
-        self.state_shape = self.replay_buffer.state_shape # This includes history, horizon, channels, etc.
+        self.state_shape = [obs_shape[0] * history]
+        if pixel_obs: self.state_shape += [obs_shape[1], obs_shape[2]]
         self.discrete = discrete
         self.action_dim = action_dim
         self.max_action = max_action
